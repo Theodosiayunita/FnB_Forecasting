@@ -1,0 +1,388 @@
+---
+title: "FnB Time Series"
+author: "Theodosia Yunita"
+date: "2024-03-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+In the realm of food and beverage businesses, understanding visitor trends and transaction patterns is paramount for making informed decisions and optimizing operational strategies. With the rapid evolution of consumer preferences and the increasing reliance on diverse dining options such as dine-in, delivery, and take-away, forecasting visitor numbers has become a crucial aspect of business planning. In this analysis, we delve into a dataset encompassing visitor data from a food and beverage establishment, spanning various transaction types including dine-in, delivery, and take-away. The primary objective and challenge are to forecast the hourly number of visitors and provide insights into the underlying seasonality. This forecast result and seasonality explanation will be evaluated on the next 7 days, from Monday, February 19th, 2018, to Sunday, February 25th, 2018. By leveraging forecasting techniques and seasonality analysis, we aim to uncover valuable insights that will empower the owner to optimize resource allocation, enhance service delivery, and ultimately drive business growth in the dynamic landscape of the food and beverage industry.
+
+Library 
+```{r}
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(ggplot2)
+library(TSstudio) 
+library(forecast)
+library(readr)
+library(padr)
+library(zoo)
+library(ggsci)
+library(xts)
+library(tseries)
+library(Metrics)
+```
+## Data Preprocessing
+
+***Train dataset***
+
+```{r}
+FnB <- read.csv("data_input/FnB/data/data-train.csv")
+
+head(FnB)
+```
+***Missing Value Check***
+
+```{r}
+anyNA(FnB)
+```
+
+***Summary of data***
+
+```{r}
+glimpse(FnB)
+```
+From the summary, we know that the data type of Transaction_date is not suitable yet. Hence, we need to change it to datetime format and then round it to the nearest hour to obtain the hourly transaction time. 
+
+```{r}
+FnB_1 <- FnB %>% 
+  mutate(transaction_date = ymd_hms(transaction_date) %>% 
+         floor_date(unit = "hour")) %>% 
+  group_by(transaction_date) %>% 
+  
+
+  summarise(visitor_number = n_distinct(receipt_number)) %>%
+  arrange(transaction_date) %>% 
+  ungroup()
+```
+
+
+```{r}
+FnB_1 <- FnB_1 %>% 
+  pad(start_val = ymd("2017-12-01"), end_val = ymd("2018-02-18"))
+```
+```{r}
+FnB_1 <- FnB_1 %>%
+  mutate(hour = hour(transaction_date)) %>% 
+  filter(hour %in% c(10:22)) %>% 
+  select(transaction_date, visitor_number)
+```
+
+Since the restaurant operates from 10 AM to 10 PM, we need to fill the NA values in the datetime column with 0
+
+```{r}
+FnB_1 <- FnB_1 %>% 
+  mutate(visitor_number = na.fill(visitor_number, 0))
+```
+
+Recheck that there is no missing value in our data
+
+```{r}
+min_date <- min(FnB_1$transaction_date)
+max_date <- max(FnB_1$transaction_date)
+
+min_date
+max_date
+```
+## Seasonality Analysis
+
+***Convert the data into time series Object***
+
+The frequency that we used is 13 which refers to the time range of the outlet open everyday
+
+
+```{r}
+FnB_ts <- ts(FnB_1$visitor_number,start=c(1,4),frequency = 13)
+```
+
+Visualize the data to see the distribution of the data
+```{r}
+autoplot(FnB_ts) + theme_minimal()
+```
+insight : the data has trend, seasonality, and error
+
+## Decomposing
+
+To observe the data trend effectively, we can perform data decomposition using monthly periods, as each month inherently exhibits its unique seasonal patterns. Consequently, upon analysis, we discern that despite the graphical representation of the trend column lacking smoothness, it reveals the presence of seasonality that was not adequately captured in FnB_ts. This suggests the likelihood of our data manifesting multiple seasonal patterns.
+
+```{r}
+FnB1_deco<-decompose(x=FnB_ts)
+autoplot(FnB1_deco)
+```
+
+***Insight***
+The visual representation depicted above reveals a distinct pattern within the Estimated Trend component, hinting at the existence of possibly overlooked additional seasonality. This observation implies that our dataset likely encompasses multiple seasonal variations. To effectively address this complex multi-seasonal nature, it becomes imperative to transition the dataset into a "Multiple Seasonality Time Series" format, which is designed to accommodate and manage multiple frequency settings seamlessly.
+
+
+## Time Series with Multiple Seasonality
+Generate a "Multi-seasonality Time Series" structure utilizing the msts() function, specifying the frequencies as Daily (13) and Weekly (13*7), thereby encompassing both daily and weekly seasonal patterns. This approach ensures the incorporation of seasonality at both the daily and weekly levels. Subsequently, proceed with decomposing the series and visualizing the results.
+
+```{r}
+FnB_msts<-msts(FnB_1$visitor_number, seasonal.periods  = c(13,13*7))
+
+autoplot(FnB_msts)
+```
+
+```{r}
+FnB_msts_deco  <- mstl(FnB_msts)
+
+FnB_msts %>% tail(4*7*13) %>% stl(s.window = "periodic") %>% autoplot()
+```
+***insight*** 
+
+Upon reviewing the aforementioned graph, it is evident that the Estimated Trend derived from the "Multiple Seasonality Time Series" exhibits enhanced smoothness and clarity. Moreover, the delineation of daily and weekly seasonality is more pronounced, rendering it more conducive to comprehensive analysis and interpretation.
+
+
+***Seasonality analysis daily by hour***
+```{r}
+FnB_1 %>% 
+  mutate(seasonal = FnB1_deco$seasonal,
+         hour = hour(transaction_date)) %>% 
+  distinct(hour, seasonal) %>% 
+  ggplot(mapping = aes(x = hour, y = seasonal, fill = as.factor(hour))) +
+  geom_col()+
+  theme_minimal()+
+  scale_x_continuous(breaks = seq(10,22,1)) +
+  labs(
+    title = "Single Seasonality Analysis",
+    subtitle = "Daily"
+  )
+```
+***Insight***
+  - The majority of visitors patronize the restaurant between 7:00 PM and 10:00 PM, at 10.00 PM is the time        time where most visitors come
+  - The restaurant experiences its lowest visitor count during its opening hours, starting from 10:00 AM.
+
+
+****Seasonality analysis weekly by hour***
+
+```{r}
+as.data.frame(FnB_msts_deco) %>%
+  mutate(tr_date = FnB_1$transaction_date) %>%
+  mutate(
+    Day_of_Week = wday(tr_date, label = T, abbr = F),
+    Hour = as.factor(hour(tr_date))
+  ) %>%
+  group_by(Day_of_Week, Hour) %>%
+  summarise(Seasonal = sum(Seasonal13 + Seasonal91)) %>%
+  ggplot() +
+  geom_bar(aes(x = Hour, y = Seasonal, fill = Day_of_Week), stat ="identity", position = "stack", width = 0.7) +
+  scale_fill_manual(values = c("Senin" = "blue", "Selasa" = "green", "Rabu" = "red", "Kamis" ="Purple","Jumat" = "orange", "Sabtu" = "yellow", "Minggu" = "cyan" )) +
+  labs(
+    title = "Multi Seasonality Analysis",
+    subtitle = "Weekly"
+  )
+```
+***Insight***
+ - Peak hours for the outlet fall within the 19:00 to 22:00 timeframe daily.
+ - Sundays witness the highest visitor influx, notably at 20:00.
+ - The least busy period occurs uniformly at 10:00 daily, corresponding to the outlet's opening hours.
+ 
+## Model Fitting and Evaluation
+
+#### Cross Validation
+
+The time series cross-validation scheme should not be randomly sampled but split sequentially. In this scenario, we will divide the data into Test (1 Week = 7 x 13 Hours) and Train (Total Data excluding Test Data).
+
+```{r}
+FnBtest_msts <- tail(FnB_msts, n = 7*13)
+FnBtrain_msts <- head(FnB_msts, n= length(FnB_ts)-length(FnBtest_msts))
+
+```
+
+#### Build Mode
+Based on the previous data analysis exploration, it is evident that this dataset exhibits both trend and seasonal patterns. Therefore, the appropriate methods for analysis are Triple Exponential Smoothing and ARIMA.
+
+
+###### Triple Exponential Smoothing Model
+
+```{r}
+#model
+FnB_TESM_test<- HoltWinters(FnBtrain_msts)
+FnB_TESM_test
+```
+
+
+```{r}
+# forecast
+Forecast_TESM_test <- forecast(FnB_TESM_test, h = 7*13)
+```
+
+
+```{r}
+fitted_values <- fitted(Forecast_TESM_test)
+
+#plot
+FnBtrain_msts %>% 
+  autoplot(series = "Actual") + 
+  autolayer(FnBtrain_msts, series = "Actual test") + 
+  autolayer(fitted_values, series = "Fitted values (additive)") +
+  autolayer(Forecast_TESM_test$mean, series = "Predict data test (additive)")
+```
+
+```{r}
+test_forecast(actual = FnB_msts,
+             forecast.obj = Forecast_TESM_test,
+             train = FnBtrain_msts,
+             test = FnBtest_msts)
+
+```
+
+****Model Evaluation***
+```{r}
+#Evaluation
+mae(Forecast_TESM_test$mean, FnBtest_msts)
+```
+
+###### ARIMA MODELLING
+
+```{r}
+#Model
+Arima_ts <- stlm(FnBtrain_msts, method = "arima")
+
+```
+
+```{r}
+#Forecast
+Forecast_Arima <- forecast(Arima_ts, h = 13*7)
+```
+
+
+***Model Evaluation***
+```{r}
+#Evaluation
+mae(Forecast_Arima$mean, FnBtest_msts)
+```
+
+
+```{r}
+#plot
+FnBtrain_msts %>% 
+  autoplot(series = "Actual") + 
+  autolayer(FnBtrain_msts, series = "Actual test") + 
+  autolayer(forecast_Arima_ts$mean, series = "Predict Auto ARIMA")
+```
+```{r}
+test_forecast(actual = FnB_msts,
+             forecast.obj = forecast_Arima_ts,
+             train = FnBtrain_msts,
+             test = FnBtest_msts)
+
+```
+
+### Visualization Actual vs Estimated
+
+```{r}
+accuracyData <- data.frame(
+  tdate = FnB_1$transaction_date %>% tail(13*7),
+  actual = as.vector(FnBtest_msts),
+  TESM_forecast = as.vector(Forecast_TESM_test$mean),
+  arima_forecast = as.vector(Forecast_Arima$mean)
+ 
+)
+```
+
+##### Visualizatin of actual VS Best Model ( ARIMA)
+```{r}
+accuracyData %>% 
+  ggplot() +
+  geom_line(aes(x = tdate, y = actual, colour = "Actual"), size = 1) +
+  geom_line(aes(x = tdate, y = arima_forecast, colour = "Arima Model (Best Model)"), size = 1)+
+  labs(
+    title = "Actual vs Arima Model",
+    subtitle = "Hourly visitor", 
+    x = "Date", 
+    y = "Visitor", 
+    colour = ""
+    ) +
+  scale_color_manual(values = c("Actual" = "tan4", "Arima Model (Best Model)" = "orange"))
+
+
+```
+##### Visualization of Actual VS All Models
+```{r}
+accuracyData %>% 
+  ggplot() +
+  geom_line(aes(x = tdate, y = actual, colour = "Actual"), size = 0.5) +
+  geom_line(aes(x = tdate, y = TESM_forecast, colour = "TESM Model"), size = 0.1) + 
+  geom_line(aes(x = tdate, y = arima_forecast, colour = "Arima Model"), size = 0.1) +
+  labs(
+    title = "Actual vs All Models", 
+    subtitle = "Hourly visitor", 
+    x = "Date", 
+    y = "Visitor", 
+    colour = "") +
+  scale_color_manual(values = c("yellow", "darkgreen", "maroon"))
+
+```
+
+## Prediction Performance
+
+As it stands, the ARIMA (5,55) model exhibits the lowest MAE value. Consequently, for the forecast on the test dataset, we will opt for the ARIMA model.
+
+```{r}
+FnB_test <- read.csv("data_input/FnB/data/data-test.csv")
+```
+
+Customize the data type
+```{r}
+FnB_test <- FnB_test %>% 
+  mutate(datetime = ymd_hms(datetime) %>% 
+           floor_date(unit = "hour"))
+```
+
+
+```{r}
+Arima_test <- stlm(FnB_ts, method = "arima")
+```
+
+```{r}
+Forecast_Arima_test <-  forecast(Arima_test, h=13*7)
+```
+
+***Insert the data into table***
+```{r}
+Insert <- FnB_test %>% 
+  mutate(visitor = Forecast_Arima_test$mean)
+```
+
+***Save Data***
+```{r}
+write.csv(Insert, file = "FnB_Forecast.csv")
+```
+
+***Check first 5 data***
+
+```{r}
+head(Insert, 26)
+```
+
+## Conclusion
+
+In order to ensure accurate forecasting, it is essential to validate several assumptions:
+
+1. Testing for Autocorrelation in Residuals:
+   To assess autocorrelation, we utilize the Box.test() function. A p-value       greater than 0.05 is indicative of accepting the null hypothesis (H0) that     there is no autocorrelation in the forecast errors.
+
+```{r}
+Box.test(x= Arima_test$residuals)
+```
+***Insight***
+With a p-value exceeding 0.05, we conclude that the residuals exhibit no autocorrelation or accepting the null hypothesis.
+
+2. Assessing Normality of Residuals:
+   The shapiro.test() function is employed to examine normality, aiming to        confirm H0 when the p-value exceeds 0.05.
+
+```{r}
+shapiro.test(Arima_test$residuals)
+```
+***Insight***
+Given a p-value below 0.9, it is evident that the residuals do not conform to a normal distribution. It is important to note that the Shapiro test solely evaluates the deviation of residual distribution from normality, without addressing forecast performance, which may deteriorate with longer forecast periods. To forecast longer-term data, additional data should be incorporated into the model.
+
+In conclusion, based on the Seasonality Analysis, it is evident that Saturday at 8:00 PM experiences the highest influx of visitors.
